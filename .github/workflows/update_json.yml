@@ -33,6 +33,8 @@ jobs:
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
           KEYWORDS: ${{ secrets.KEYWORDS }}
+          REFERER: ${{ secrets.REFERER }}
+          ORIGIN: ${{ secrets.ORIGIN }}
         run: python script.py
 
       - name: Push JSON to private repo
