@@ -1,0 +1,61 @@
+name: Update Courses JSON
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"   # every 3 hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-courses-json
+  cancel-in-progress: false
+
+jobs:
+  update-json:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout scraper repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper (create master_courses.json)
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+          KEYWORDS: ${{ secrets.KEYWORDS }}
+          REFERER: ${{ secrets.REFERER }}
+          ORIGIN: ${{ secrets.ORIGIN }}
+        run: python script.py
+
+      - name: Push JSON to private repo
+        env:
+          PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          set -e
+
+          # ensure JSON exists
+          test -f master_courses.json
+          test -s master_courses.json
+
+          git config --global user.name "Automated"
+          git config --global user.email "actions@users.noreply.github.com"
+
+          git clone "https://x-access-token:${PUSH_TOKEN}@github.com/${PRIVATE_REPO}.git" private-data
+
+          cp master_courses.json private-data/master_courses.json
+
+          cd private-data
+          git add master_courses.json
+          git commit -m "Update master_courses.json: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" || exit 0
+          git push
