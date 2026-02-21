@@ -1,32 +1,75 @@
-- name: Push JSON to private repo
-  env:
-    PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
-    PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
-  run: |
-    set -e
+name: Update Courses JSON
 
-    # ===============================
-    # SKIP PUSH IF GLOBAL OUTAGE
-    # ===============================
-    if [ -f SKIP_PUSH ]; then
-      echo "Global outage detected — skipping push."
-      exit 0
-    fi
+on:
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
 
-    # ensure JSON exists and not empty
-    if [ ! -s master_courses.json ]; then
-      echo "master_courses.json missing or empty — skipping push."
-      exit 0
-    fi
+permissions:
+  contents: read
 
-    git config --global user.name "Automated"
-    git config --global user.email "actions@users.noreply.github.com"
+concurrency:
+  group: update-courses-json
+  cancel-in-progress: false
 
-    git clone "https://x-access-token:${PUSH_TOKEN}@github.com/${PRIVATE_REPO}.git" private-data
+jobs:
+  update-json:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout scraper repo
+        uses: actions/checkout@v4
 
-    cp master_courses.json private-data/master_courses.json
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    cd private-data
-    git add master_courses.json
-    git commit -m "Update master_courses.json: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" || exit 0
-    git push
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper (create master_courses.json)
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+          KEYWORDS: ${{ secrets.KEYWORDS }}
+          REFERER: ${{ secrets.REFERER }}
+          ORIGIN: ${{ secrets.ORIGIN }}
+          THREADS: "3"
+          MAX_RETRIES: "5"
+          REQUEST_TIMEOUT: "25"
+          BACKOFF_BASE: "0.8"
+          BACKOFF_CAP: "10"
+          REQUEST_JITTER: "0.15"
+        run: python script.py
+
+      - name: Debug files
+        run: ls -lah
+
+      - name: Push JSON to private repo
+        env:
+          PUSH_TOKEN: ${{ secrets.PUSH_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          set -e
+
+          if [ -f SKIP_PUSH ]; then
+            echo "Global outage detected — skipping push."
+            exit 0
+          fi
+
+          if [ ! -s master_courses.json ]; then
+            echo "master_courses.json missing or empty — skipping push."
+            exit 0
+          fi
+
+          git config --global user.name "Automated"
+          git config --global user.email "actions@users.noreply.github.com"
+
+          git clone "https://x-access-token:${PUSH_TOKEN}@github.com/${PRIVATE_REPO}.git" private-data
+
+          cp master_courses.json private-data/master_courses.json
+          cd private-data
+          git add master_courses.json
+          git commit -m "Update master_courses.json: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" || exit 0
+          git push
