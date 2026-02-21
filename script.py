@@ -62,19 +62,19 @@ def safe_get(url):
                 if attempt < MAX_RETRIES:
                     time.sleep(wait)
                     continue
-                return []
+                return [], False
             if code != 200:
-                return []
+                return [], False
             try:
-                return r.json()
+                return r.json(), True
             except Exception:
-                return []
+                return [], False
         except requests.RequestException:
             wait = min(BACKOFF_CAP, BACKOFF_BASE * (2 ** (attempt - 1))) + random.uniform(0, 0.3)
             if attempt < MAX_RETRIES:
                 time.sleep(wait)
                 continue
-            return []
+            return [], False
 
 def load_master_json():
     try:
@@ -83,7 +83,7 @@ def load_master_json():
             if not isinstance(data, list):
                 raise ValueError("master_courses.json is not a list")
             for c in data:
-                if isinstance(c, dict) and "course_id" in c and c["course_id"] is not None:
+                if isinstance(c, dict) and c.get("course_id") is not None:
                     c["course_id"] = str(c["course_id"])
             return data
     except FileNotFoundError:
@@ -181,79 +181,87 @@ def merge_list_by_fingerprint(existing_list, new_list):
     return existing_list
 
 def merge_course(existing_course, new_course):
-    merge_dict_fill_only(existing_course, new_course)
+    merge_dict_fill_only(existing_course, {k: v for k, v in new_course.items() if k != "_ok"})
 
-    existing_course["classroom"] = merge_list_by_key(
-        existing_course.get("classroom", []),
-        new_course.get("classroom", []),
-        key="id"
-    )
+    ok = new_course.get("_ok") or {}
+    classroom_ok = bool(ok.get("classroom"))
+    today_ok = bool(ok.get("today"))
+    updates_ok = bool(ok.get("updates"))
 
-    existing_course["live_classes"] = merge_list_by_key(
-        existing_course.get("live_classes", []),
-        new_course.get("live_classes", []),
-        key="id"
-    )
+    if classroom_ok:
+        existing_course["classroom"] = merge_list_by_key(
+            existing_course.get("classroom", []),
+            new_course.get("classroom", []),
+            key="id"
+        )
 
-    existing_course["announcements"] = merge_list_by_fingerprint(
-        existing_course.get("announcements", []),
-        new_course.get("announcements", [])
-    )
+        existing_lessons = existing_course.get("lessons", [])
+        if not isinstance(existing_lessons, list):
+            existing_lessons = []
 
-    existing_lessons = existing_course.get("lessons", [])
-    if not isinstance(existing_lessons, list):
-        existing_lessons = []
+        new_lessons = new_course.get("lessons", [])
+        if not isinstance(new_lessons, list):
+            new_lessons = []
 
-    new_lessons = new_course.get("lessons", [])
-    if not isinstance(new_lessons, list):
-        new_lessons = []
+        lesson_idx = {}
+        for i, l in enumerate(existing_lessons):
+            if isinstance(l, dict):
+                lid = l.get("lesson_id")
+                if lid not in (None, ""):
+                    lesson_idx[str(lid)] = i
 
-    lesson_idx = {}
-    for i, l in enumerate(existing_lessons):
-        if isinstance(l, dict):
-            lid = l.get("lesson_id")
-            if lid not in (None, ""):
-                lesson_idx[str(lid)] = i
+        for lesson in new_lessons:
+            if not isinstance(lesson, dict):
+                if lesson not in existing_lessons:
+                    existing_lessons.append(lesson)
+                continue
 
-    for lesson in new_lessons:
-        if not isinstance(lesson, dict):
-            if lesson not in existing_lessons:
+            lid = lesson.get("lesson_id")
+            if lid in (None, ""):
+                if lesson not in existing_lessons:
+                    existing_lessons.append(lesson)
+                continue
+
+            lid = str(lid)
+            if lid in lesson_idx:
+                target = existing_lessons[lesson_idx[lid]]
+                merge_dict_fill_only(target, lesson)
+                target["videos"] = merge_list_by_key(
+                    target.get("videos", []),
+                    lesson.get("videos", []),
+                    key="id"
+                )
+                if isinstance(lesson.get("notes"), list):
+                    if not isinstance(target.get("notes"), list):
+                        target["notes"] = []
+                    for n in lesson["notes"]:
+                        if n not in target["notes"]:
+                            target["notes"].append(n)
+                if isinstance(target.get("videos"), list):
+                    target["lesson_count"] = len(target["videos"])
+            else:
+                if isinstance(lesson.get("videos"), list):
+                    lesson["lesson_count"] = len(lesson["videos"])
                 existing_lessons.append(lesson)
-            continue
+                lesson_idx[lid] = len(existing_lessons) - 1
 
-        lid = lesson.get("lesson_id")
-        if lid in (None, ""):
-            if lesson not in existing_lessons:
-                existing_lessons.append(lesson)
-            continue
+        existing_course["lessons"] = existing_lessons
+        existing_course["lesson_count"] = sum(
+            len(l.get("videos", [])) for l in existing_lessons if isinstance(l, dict)
+        )
 
-        lid = str(lid)
-        if lid in lesson_idx:
-            target = existing_lessons[lesson_idx[lid]]
-            merge_dict_fill_only(target, lesson)
-            target["videos"] = merge_list_by_key(
-                target.get("videos", []),
-                lesson.get("videos", []),
-                key="id"
-            )
-            if isinstance(lesson.get("notes"), list):
-                if not isinstance(target.get("notes"), list):
-                    target["notes"] = []
-                for n in lesson["notes"]:
-                    if n not in target["notes"]:
-                        target["notes"].append(n)
-            if isinstance(target.get("videos"), list):
-                target["lesson_count"] = len(target["videos"])
-        else:
-            if isinstance(lesson.get("videos"), list):
-                lesson["lesson_count"] = len(lesson["videos"])
-            existing_lessons.append(lesson)
-            lesson_idx[lid] = len(existing_lessons) - 1
+    if today_ok:
+        existing_course["live_classes"] = merge_list_by_key(
+            existing_course.get("live_classes", []),
+            new_course.get("live_classes", []),
+            key="id"
+        )
 
-    existing_course["lessons"] = existing_lessons
-    existing_course["lesson_count"] = sum(
-        len(l.get("videos", [])) for l in existing_lessons if isinstance(l, dict)
-    )
+    if updates_ok:
+        existing_course["announcements"] = merge_list_by_fingerprint(
+            existing_course.get("announcements", []),
+            new_course.get("announcements", [])
+        )
 
 def upsert_course(master_json, course_id, new_course):
     course_id = str(course_id)
@@ -263,8 +271,9 @@ def upsert_course(master_json, course_id, new_course):
             return
     master_json.append(new_course)
 
-batches = ensure_list(safe_get(f"{BASE}/batches"))
-if not batches:
+batches_data, batches_ok = safe_get(f"{BASE}/batches")
+batches = ensure_list(batches_data)
+if not batches_ok or not batches:
     raise SystemExit
 
 keyword_patterns = []
@@ -304,53 +313,69 @@ def fetch_course_details(course, rank, total):
         "announcements": [],
         "lesson_count": 0,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "_ok": {"classroom": False, "today": False, "updates": False},
     }
 
-    classroom = ensure_list(safe_get(f"{BASE}/classroom/{cid}"))
-    out["classroom"] = classroom
+    classroom_data, classroom_ok = safe_get(f"{BASE}/classroom/{cid}")
+    classroom = ensure_list(classroom_data)
+    out["_ok"]["classroom"] = bool(classroom_ok)
+    if classroom_ok:
+        out["classroom"] = classroom
 
-    for cls in classroom:
-        if not isinstance(cls, dict):
-            continue
-        lid = cls.get("id")
-        if not lid:
-            continue
-
-        lessons = ensure_list(safe_get(f"{BASE}/lesson/{lid}"))
-        for l in lessons:
-            if not isinstance(l, dict):
+        for cls in classroom:
+            if not isinstance(cls, dict):
+                continue
+            lid = cls.get("id")
+            if not lid:
                 continue
 
-            videos = []
-            for v in (l.get("videos") or []):
-                if not isinstance(v, dict):
-                    continue
-                vid = v.get("id")
-                vd = safe_get(f"{BASE}/video/{vid}") if vid else {}
-                if not isinstance(vd, dict):
-                    vd = {}
+            lessons_data, lessons_ok = safe_get(f"{BASE}/lesson/{lid}")
+            if not lessons_ok:
+                continue
+            lessons = ensure_list(lessons_data)
 
-                videos.append({
-                    "id": str(vid) if vid is not None else None,
-                    "name": v.get("name", ""),
-                    "published_at": v.get("published_at", ""),
-                    "thumb": v.get("thumb", ""),
-                    "type": v.get("type", ""),
-                    "pdfs": v.get("pdfs") or [],
-                    "m3u": vd.get("video_url", "") or "",
-                    "yt": vd.get("hd_video_url", "") or "",
+            for l in lessons:
+                if not isinstance(l, dict):
+                    continue
+
+                videos = []
+                for v in (l.get("videos") or []):
+                    if not isinstance(v, dict):
+                        continue
+
+                    vid = v.get("id")
+                    vd_data, vd_ok = safe_get(f"{BASE}/video/{vid}") if vid else ({}, False)
+                    vd = vd_data if isinstance(vd_data, dict) else {}
+
+                    videos.append({
+                        "id": str(vid) if vid is not None else None,
+                        "name": v.get("name", ""),
+                        "published_at": v.get("published_at", ""),
+                        "thumb": v.get("thumb", ""),
+                        "type": v.get("type", ""),
+                        "pdfs": v.get("pdfs") or [],
+                        "m3u": vd.get("video_url", "") if vd_ok else "",
+                        "yt": vd.get("hd_video_url", "") if vd_ok else "",
+                    })
+
+                out["lessons"].append({
+                    "lesson_id": str(l.get("id")) if l.get("id") is not None else None,
+                    "lesson_name": l.get("name", ""),
+                    "lesson_count": len(videos),
+                    "videos": videos,
+                    "notes": l.get("notes") or [],
                 })
 
-            out["lessons"].append({
-                "lesson_id": str(l.get("id")) if l.get("id") is not None else None,
-                "lesson_name": l.get("name", ""),
-                "lesson_count": len(videos),
-                "videos": videos,
-                "notes": l.get("notes") or [],
-            })
+    today_data, today_ok = safe_get(f"{BASE}/today/{cid}")
+    out["_ok"]["today"] = bool(today_ok)
+    if today_ok:
+        out["live_classes"] = ensure_list(today_data)
 
-    out["live_classes"] = ensure_list(safe_get(f"{BASE}/today/{cid}"))
-    out["announcements"] = ensure_list(safe_get(f"{BASE}/updates/{cid}"))
+    updates_data, updates_ok = safe_get(f"{BASE}/updates/{cid}")
+    out["_ok"]["updates"] = bool(updates_ok)
+    if updates_ok:
+        out["announcements"] = ensure_list(updates_data)
+
     return out
 
 master_json = load_master_json()
@@ -364,23 +389,23 @@ with ThreadPoolExecutor(max_workers=THREADS) as ex:
     for f in as_completed(futures):
         results.append(f.result())
 
-if not results:
-    raise SystemExit
-
-has_any_real_data = any(
-    (len(r.get("classroom", [])) > 0) or (len(r.get("lessons", [])) > 0) or
-    (len(r.get("live_classes", [])) > 0) or (len(r.get("announcements", [])) > 0)
+any_ok_anywhere = any(
+    r.get("_ok", {}).get("classroom") or r.get("_ok", {}).get("today") or r.get("_ok", {}).get("updates")
     for r in results
 )
 
-if not has_any_real_data and master_json:
-    print("outage_detected_skip_save")
+if not any_ok_anywhere:
+    print("global_outage_skip_save")
     raise SystemExit
 
 for r in results:
     cid = r.get("course_id")
     if cid:
         upsert_course(master_json, cid, r)
+
+for c in master_json:
+    if isinstance(c, dict) and "_ok" in c:
+        c.pop("_ok", None)
 
 save_master_json(master_json)
 print("done")
