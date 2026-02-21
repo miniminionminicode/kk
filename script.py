@@ -80,15 +80,22 @@ def load_master_json():
     try:
         with open(MASTER_JSON_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, list) else []
+            if not isinstance(data, list):
+                raise ValueError("master_courses.json is not a list")
+            for c in data:
+                if isinstance(c, dict) and "course_id" in c and c["course_id"] is not None:
+                    c["course_id"] = str(c["course_id"])
+            return data
     except FileNotFoundError:
         return []
-    except Exception:
-        return []
+    except Exception as e:
+        raise RuntimeError(f"Failed to read {MASTER_JSON_FILE}: {e}")
 
 def save_master_json(data):
-    with open(MASTER_JSON_FILE, "w", encoding="utf-8") as f:
+    tmp = MASTER_JSON_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, MASTER_JSON_FILE)
 
 def is_blank(x):
     return x in (None, "", [], {})
@@ -146,14 +153,12 @@ def merge_list_by_key(existing_list, new_list, key="id"):
 def fingerprint(item):
     if not isinstance(item, dict):
         return str(item)
-
     for k in ("id", "notice_id", "_id", "update_id", "uid"):
         v = item.get(k)
         if v not in (None, "", [], {}):
             return f"{k}:{v}"
-
-    body = item.get("content") or ""
-    ts = item.get("published_at") or ""
+    ts = item.get("published_at") or item.get("publishedAt") or item.get("created_at") or item.get("createdAt") or ""
+    body = item.get("content") or item.get("message") or item.get("description") or ""
     return f"{ts}|{hash(body)}"
 
 def merge_list_by_fingerprint(existing_list, new_list):
@@ -251,8 +256,9 @@ def merge_course(existing_course, new_course):
     )
 
 def upsert_course(master_json, course_id, new_course):
+    course_id = str(course_id)
     for c in master_json:
-        if c.get("course_id") == course_id:
+        if str(c.get("course_id")) == course_id:
             merge_course(c, new_course)
             return
     master_json.append(new_course)
@@ -288,7 +294,7 @@ def fetch_course_details(course, rank, total):
     cid = course["id"]
     out = {
         "ranking": rank,
-        "course_id": str(cid),
+        "course_id": str(cid) if cid is not None else None,
         "course_name": course.get("title"),
         "image_large": course.get("image_large"),
         "image_thumb": course.get("image_thumb"),
@@ -304,28 +310,40 @@ def fetch_course_details(course, rank, total):
     out["classroom"] = classroom
 
     for cls in classroom:
+        if not isinstance(cls, dict):
+            continue
         lid = cls.get("id")
         if not lid:
             continue
+
         lessons = ensure_list(safe_get(f"{BASE}/lesson/{lid}"))
         for l in lessons:
+            if not isinstance(l, dict):
+                continue
+
             videos = []
             for v in (l.get("videos") or []):
+                if not isinstance(v, dict):
+                    continue
                 vid = v.get("id")
                 vd = safe_get(f"{BASE}/video/{vid}") if vid else {}
+                if not isinstance(vd, dict):
+                    vd = {}
+
                 videos.append({
-                    "id": str(vid),
-                    "name": v.get("name"),
-                    "published_at": v.get("published_at"),
-                    "thumb": v.get("thumb"),
-                    "type": v.get("type"),
+                    "id": str(vid) if vid is not None else None,
+                    "name": v.get("name", ""),
+                    "published_at": v.get("published_at", ""),
+                    "thumb": v.get("thumb", ""),
+                    "type": v.get("type", ""),
                     "pdfs": v.get("pdfs") or [],
-                    "m3u": vd.get("video_url") if isinstance(vd, dict) else "",
-                    "yt": vd.get("hd_video_url") if isinstance(vd, dict) else "",
+                    "m3u": vd.get("video_url", "") or "",
+                    "yt": vd.get("hd_video_url", "") or "",
                 })
+
             out["lessons"].append({
-                "lesson_id": str(l.get("id")),
-                "lesson_name": l.get("name"),
+                "lesson_id": str(l.get("id")) if l.get("id") is not None else None,
+                "lesson_name": l.get("name", ""),
                 "lesson_count": len(videos),
                 "videos": videos,
                 "notes": l.get("notes") or [],
@@ -346,8 +364,23 @@ with ThreadPoolExecutor(max_workers=THREADS) as ex:
     for f in as_completed(futures):
         results.append(f.result())
 
+if not results:
+    raise SystemExit
+
+has_any_real_data = any(
+    (len(r.get("classroom", [])) > 0) or (len(r.get("lessons", [])) > 0) or
+    (len(r.get("live_classes", [])) > 0) or (len(r.get("announcements", [])) > 0)
+    for r in results
+)
+
+if not has_any_real_data and master_json:
+    print("outage_detected_skip_save")
+    raise SystemExit
+
 for r in results:
-    upsert_course(master_json, r["course_id"], r)
+    cid = r.get("course_id")
+    if cid:
+        upsert_course(master_json, cid, r)
 
 save_master_json(master_json)
 print("done")
