@@ -274,7 +274,9 @@ def upsert_course(master_json, course_id, new_course):
 batches_data, batches_ok = safe_get(f"{BASE}/batches")
 batches = ensure_list(batches_data)
 if not batches_ok or not batches:
-    raise SystemExit
+    with open("SKIP_PUSH", "w", encoding="utf-8") as f:
+        f.write("1")
+    raise SystemExit(0)
 
 keyword_patterns = []
 for kw in KEYWORDS:
@@ -393,19 +395,18 @@ any_ok_anywhere = any(
     r.get("_ok", {}).get("classroom") or r.get("_ok", {}).get("today") or r.get("_ok", {}).get("updates")
     for r in results
 )
-
 if not any_ok_anywhere:
+    with open("SKIP_PUSH", "w", encoding="utf-8") as f:
+        f.write("1")
     print("global_outage_skip_save")
-    raise SystemExit
+    raise SystemExit(0)
 
 for r in results:
     cid = r.get("course_id")
     if cid:
         upsert_course(master_json, cid, r)
-
 for c in master_json:
-    if isinstance(c, dict) and "_ok" in c:
+    if isinstance(c, dict):
         c.pop("_ok", None)
-
 save_master_json(master_json)
 print("done")
