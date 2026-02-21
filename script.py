@@ -6,15 +6,13 @@ import json
 import re
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 BASE = os.getenv("BASE_URL")
 if not BASE:
     raise RuntimeError("Missing BASE_URL secret")
-
+    
 _keywords_env = os.getenv("KEYWORDS")
 if not _keywords_env:
     raise RuntimeError("Missing KEYWORDS secret")
-
 KEYWORDS = [k.strip().lower() for k in _keywords_env.split(",") if k.strip()]
 
 REFERER = os.getenv("REFERER")
@@ -319,9 +317,9 @@ def fetch_course_details(course, rank, total):
     }
 
     classroom_data, classroom_ok = safe_get(f"{BASE}/classroom/{cid}")
-    classroom = ensure_list(classroom_data)
     out["_ok"]["classroom"] = bool(classroom_ok)
     if classroom_ok:
+        classroom = ensure_list(classroom_data)
         out["classroom"] = classroom
 
         for cls in classroom:
@@ -390,7 +388,6 @@ with ThreadPoolExecutor(max_workers=THREADS) as ex:
     ]
     for f in as_completed(futures):
         results.append(f.result())
-
 any_ok_anywhere = any(
     r.get("_ok", {}).get("classroom") or r.get("_ok", {}).get("today") or r.get("_ok", {}).get("updates")
     for r in results
@@ -400,7 +397,6 @@ if not any_ok_anywhere:
         f.write("1")
     print("global_outage_skip_save")
     raise SystemExit(0)
-
 for r in results:
     cid = r.get("course_id")
     if cid:
